@@ -14,8 +14,30 @@ import requests
 import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
+from pydantic import BaseModel, Field
 
 class Tools:
+    class Valves(BaseModel):
+        priority: int = Field(
+            default=0, description="Priority level for the filter operations."
+        )
+        HA_URL: str = Field(
+            default="http://homeassistant.local:8123",
+            description="Home Assistant URL - The full URL of your Home Assistant instance (e.g., http://192.168.1.100:8123)."
+        )
+        HA_API_KEY: str = Field(
+            default="",
+            description="Home Assistant API Key - Your Long-Lived Access Token for Home Assistant."
+        )
+        HA_PRINTER_NOTIFY_SERVICE: str = Field(
+            default="",
+            description="Home Assistant Printer Notify Service - The name of the notify service to use for printing (e.g., 'my_cups_printer')."
+        )
+        HA_ALARM_CODE: str = Field(
+            default="",
+            description="Home Assistant Alarm Code - The code to arm or disarm the alarm system, if required."
+        )
+
     # A map to handle plural, singular, and common aliases for Home Assistant domains.
     # Defined at the class level for clarity and to avoid re-declaration.
     DOMAIN_MAP = {
@@ -66,11 +88,13 @@ class Tools:
     device names (e.g., "Living Room Lamp") to their system IDs, control their state (on/off),
     and query their current status.
     """
-    def __init__(self, valves: Any):
+    def __init__(self):
         """
         Initializes the Home Assistant tool, sets up configuration, and verifies the connection.
         Loads configuration from the OpenWebUI Valves system or environment variables.
         """
+        self.valves = self.Valves()
+        
         # Setup basic logging
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         self.logger = logging.getLogger(__name__)
@@ -79,20 +103,13 @@ class Tools:
         self.entities_cache: Optional[List[Dict]] = None
         self.entities_last_fetched: Optional[datetime] = None
 
-        # The Valves object is used to manage user-configurable settings from the OpenWebUI interface.
-        self.valves = valves
-        self.valves.set_config("HA_URL", "http://homeassistant.local:8123", "Home Assistant URL", "The full URL of your Home Assistant instance (e.g., http://192.168.1.100:8123).")
-        self.valves.set_config("HA_API_KEY", "", "Home Assistant API Key", "Your Long-Lived Access Token for Home Assistant.")
-        self.valves.set_config("HA_PRINTER_NOTIFY_SERVICE", "", "Home Assistant Printer Notify Service", "The name of the notify service to use for printing (e.g., 'my_cups_printer').")
-        self.valves.set_config("HA_ALARM_CODE", "", "Home Assistant Alarm Code", "The code to arm or disarm the alarm system, if required.")
-
-        # Retrieve the configuration values. This will prioritize environment variables
-        # but fall back to the defaults set above if they are not found.
-        self.ha_url = self.valves.get("HA_URL")
-        self.ha_api_key = self.valves.get("HA_API_KEY")
+        # Retrieve the configuration values from valves
+        self.ha_url = self.valves.HA_URL
+        self.ha_api_key = self.valves.HA_API_KEY
 
         if not self.ha_url or not self.ha_api_key:
-            raise ValueError("HA_URL and HA_API_KEY must be configured in the tool settings or as environment variables.")
+            self.logger.warning("HA_URL and HA_API_KEY must be configured in the tool settings.")
+            return
 
         # Clean up trailing slashes from the URL if they exist
         if self.ha_url.endswith("/"):
@@ -100,16 +117,21 @@ class Tools:
 
         # Set up a session for connection pooling and default headers
         self.session = requests.Session()
-        self.session.headers.update({
-            "Authorization": f"Bearer {self.ha_api_key}",
-            "Content-Type": "application/json",
-        })
+        if self.ha_api_key:
+            self.session.headers.update({
+                "Authorization": f"Bearer {self.ha_api_key}",
+                "Content-Type": "application/json",
+            })
 
-        # Verify the connection on startup to fail fast
-        self._verify_connection()
+            # Verify the connection on startup to fail fast
+            self._verify_connection()
 
     def _verify_connection(self):
         """Verifies the connection and authentication with Home Assistant on startup."""
+        if not self.ha_url or not self.ha_api_key:
+            self.logger.warning("Home Assistant URL or API key not configured.")
+            return
+            
         self.logger.info("Verifying connection to Home Assistant...")
         try:
             # A simple GET request to the base API endpoint to check connectivity and auth
@@ -119,17 +141,20 @@ class Tools:
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401:
                 self.logger.error("Authentication failed. Please check your HA_API_KEY.")
-                raise ConnectionError("Authentication failed. Invalid Home Assistant API Key.")
-            raise ConnectionError(f"Failed to connect to Home Assistant (HTTP {e.response.status_code}): {e}")
+                return
+            self.logger.error(f"Failed to connect to Home Assistant (HTTP {e.response.status_code}): {e}")
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Failed to connect to {self.ha_url}. Please check the URL and network connectivity.")
-            raise ConnectionError(f"Could not connect to Home Assistant: {e}")
+            return
 
     def _get_all_entities(self) -> List[Dict]:
         """
         Fetches all entity states from Home Assistant, using a cache to avoid repeated calls.
         The cache expires after 60 seconds.
         """
+        if not self.ha_url or not self.ha_api_key:
+            return []
+            
         if self.entities_cache and self.entities_last_fetched and \
            (datetime.now() - self.entities_last_fetched) < timedelta(seconds=60):
             return self.entities_cache
