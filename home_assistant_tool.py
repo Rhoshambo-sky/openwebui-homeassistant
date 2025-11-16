@@ -21,32 +21,30 @@ from pydantic import BaseModel, Field
 from urllib.parse import urlparse
 
 
-class Valves(BaseModel):
-    """Configuration settings for the Home Assistant tool (admin-level)."""
-    HA_URL: str = Field(
-        default="http://homeassistant.local:8123",
-        description="The full URL of your Home Assistant instance (e.g., http://192.168.1.100:8123)"
-    )
-    HA_API_KEY: str = Field(
-        default="",
-        description="Your Long-Lived Access Token for Home Assistant"
-    )
-    HA_PRINTER_NOTIFY_SERVICE: str = Field(
-        default="",
-        description="The name of the notify service to use for printing (e.g., 'my_cups_printer')"
-    )
-    HA_ALARM_CODE: str = Field(
-        default="",
-        description="The code to arm or disarm the alarm system, if required"
-    )
-
-
-class UserValves(BaseModel):
-    """Per-user configuration settings (currently unused, reserved for future multi-user support)."""
-    pass
-
-
 class Tools:
+    class Valves(BaseModel):
+        """Configuration settings for the Home Assistant tool (admin-level)."""
+        HA_URL: str = Field(
+            default="http://homeassistant.local:8123",
+            description="The full URL of your Home Assistant instance (e.g., http://192.168.1.100:8123)"
+        )
+        HA_API_KEY: str = Field(
+            default="",
+            description="Your Long-Lived Access Token for Home Assistant"
+        )
+        HA_PRINTER_NOTIFY_SERVICE: str = Field(
+            default="",
+            description="The name of the notify service to use for printing (e.g., 'my_cups_printer')"
+        )
+        HA_ALARM_CODE: str = Field(
+            default="",
+            description="The code to arm or disarm the alarm system, if required"
+        )
+
+    class UserValves(BaseModel):
+        """Per-user configuration settings (currently unused, reserved for future multi-user support)."""
+        pass
+
     # A map to handle plural, singular, and common aliases for Home Assistant domains.
     # Defined at the class level for clarity and to avoid re-declaration.
     DOMAIN_MAP = {
@@ -97,7 +95,7 @@ class Tools:
     device names (e.g., "Living Room Lamp") to their system IDs, control their state (on/off),
     and query their current status.
     """
-    def __init__(self, valves: Valves):
+    def __init__(self):
         """
         Initializes the Home Assistant tool, sets up configuration, and verifies the connection.
         Loads configuration from the OpenWebUI Valves system or environment variables.
@@ -110,8 +108,8 @@ class Tools:
         self.entities_cache: Optional[List[Dict]] = None
         self.entities_last_fetched: Optional[datetime] = None
 
-        # Store the Valves configuration
-        self.valves = valves
+        # OpenWebUI will automatically inject the Valves configuration
+        self.valves = self.Valves()
 
         # Retrieve the configuration values
         self.ha_url = self.valves.HA_URL
@@ -1293,18 +1291,3 @@ class Tools:
 
         notification_list_str = "\n- ".join(notifications)
         return f"The following notifications are active:\n- {notification_list_str}"
-
-class App:
-    """
-    This is the main application class for the OpenWebUI tool, compliant with the 0.5 standard.
-    It is responsible for initializing the tool and handling its lifecycle.
-    It acts as an entry point for the OpenWebUI, which will instantiate it and manage its lifecycle.
-    """
-    def __init__(self):
-        self.valves = Valves()
-        self.tools = None
-
-    def __call__(self, *args, **kwargs):
-        if self.tools is None:
-            self.tools = Tools(self.valves)
-        return self.tools
