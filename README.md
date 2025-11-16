@@ -3,7 +3,16 @@
 This tool connects OpenWebUI to a Home Assistant instance, allowing a Large Language Model (LLM) to control and query smart home devices using natural, human-readable language.
 
 **Author:** Rhoshambo
-**Version:** 0.2.0
+**Version:** 0.2.1
+
+## What's New in 0.2.1
+
+- **OpenWebUI 0.5 Compliance**: Full compliance with OpenWebUI 0.5 standards
+- **Pydantic Valves**: Proper configuration management using Pydantic BaseModel
+- **Event Emitter Support**: Real-time progress updates during operations
+- **Enhanced Validation**: Improved URL and API key validation with security warnings
+- **Better Logging**: More granular debug logging for troubleshooting
+- **Type Safety**: Improved type hints throughout the codebase
 
 ## Features
 
