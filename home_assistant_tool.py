@@ -1,19 +1,50 @@
 """
 title: Home Assistant Controls
 author: Rhoshambo
-Git Respository:https://github.com/Rhoshambo-sky/openwebui-homeassistant
+author_url: https://github.com/Rhoshambo-sky
+git_url: https://github.com/Rhoshambo-sky/openwebui-homeassistant
 description: Connects to a Home Assistant instance to control and query smart home devices using their human-readable names.
 funding_url: https://github.com/open-webui
-version: 0.2.0
-Requirements: requests.txt; Read the README.md for more information.
-License: MIT
+version: 0.2.1
+required_open_webui_version: 0.5.0
+requirements: requests, pydantic
+licence: MIT
 """
 
 import os
+import re
 import requests
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 from datetime import datetime, timedelta
+from pydantic import BaseModel, Field
+from urllib.parse import urlparse
+
+
+class Valves(BaseModel):
+    """Configuration settings for the Home Assistant tool (admin-level)."""
+    HA_URL: str = Field(
+        default="http://homeassistant.local:8123",
+        description="The full URL of your Home Assistant instance (e.g., http://192.168.1.100:8123)"
+    )
+    HA_API_KEY: str = Field(
+        default="",
+        description="Your Long-Lived Access Token for Home Assistant"
+    )
+    HA_PRINTER_NOTIFY_SERVICE: str = Field(
+        default="",
+        description="The name of the notify service to use for printing (e.g., 'my_cups_printer')"
+    )
+    HA_ALARM_CODE: str = Field(
+        default="",
+        description="The code to arm or disarm the alarm system, if required"
+    )
+
+
+class UserValves(BaseModel):
+    """Per-user configuration settings (currently unused, reserved for future multi-user support)."""
+    pass
+
 
 class Tools:
     # A map to handle plural, singular, and common aliases for Home Assistant domains.
@@ -66,7 +97,7 @@ class Tools:
     device names (e.g., "Living Room Lamp") to their system IDs, control their state (on/off),
     and query their current status.
     """
-    def __init__(self, valves: Any):
+    def __init__(self, valves: Valves):
         """
         Initializes the Home Assistant tool, sets up configuration, and verifies the connection.
         Loads configuration from the OpenWebUI Valves system or environment variables.
@@ -79,20 +110,32 @@ class Tools:
         self.entities_cache: Optional[List[Dict]] = None
         self.entities_last_fetched: Optional[datetime] = None
 
-        # The Valves object is used to manage user-configurable settings from the OpenWebUI interface.
+        # Store the Valves configuration
         self.valves = valves
-        self.valves.set_config("HA_URL", "http://homeassistant.local:8123", "Home Assistant URL", "The full URL of your Home Assistant instance (e.g., http://192.168.1.100:8123).")
-        self.valves.set_config("HA_API_KEY", "", "Home Assistant API Key", "Your Long-Lived Access Token for Home Assistant.")
-        self.valves.set_config("HA_PRINTER_NOTIFY_SERVICE", "", "Home Assistant Printer Notify Service", "The name of the notify service to use for printing (e.g., 'my_cups_printer').")
-        self.valves.set_config("HA_ALARM_CODE", "", "Home Assistant Alarm Code", "The code to arm or disarm the alarm system, if required.")
 
-        # Retrieve the configuration values. This will prioritize environment variables
-        # but fall back to the defaults set above if they are not found.
-        self.ha_url = self.valves.get("HA_URL")
-        self.ha_api_key = self.valves.get("HA_API_KEY")
+        # Retrieve the configuration values
+        self.ha_url = self.valves.HA_URL
+        self.ha_api_key = self.valves.HA_API_KEY
 
         if not self.ha_url or not self.ha_api_key:
             raise ValueError("HA_URL and HA_API_KEY must be configured in the tool settings or as environment variables.")
+
+        # Validate URL format
+        parsed_url = urlparse(self.ha_url)
+        if not parsed_url.scheme or not parsed_url.netloc:
+            raise ValueError("Invalid HA_URL format. Must be a valid URL (e.g., http://192.168.1.100:8123)")
+
+        # Validate URL scheme
+        if not re.match(r'^https?://', self.ha_url):
+            raise ValueError("HA_URL must start with http:// or https://")
+
+        # Warn if using HTTP instead of HTTPS
+        if parsed_url.scheme != 'https':
+            self.logger.warning("Using HTTP instead of HTTPS. Connection is not encrypted! Consider using HTTPS for production.")
+
+        # Validate API key format (Long-Lived Access Tokens are typically long alphanumeric strings)
+        if len(self.ha_api_key) < 50:
+            self.logger.warning("HA_API_KEY seems unusually short. Ensure it's a Long-Lived Access Token from Home Assistant.")
 
         # Clean up trailing slashes from the URL if they exist
         if self.ha_url.endswith("/"):
@@ -108,53 +151,78 @@ class Tools:
         # Verify the connection on startup to fail fast
         self._verify_connection()
 
-    def _verify_connection(self):
+    def _verify_connection(self, __event_emitter__: Optional[Callable] = None):
         """Verifies the connection and authentication with Home Assistant on startup."""
         self.logger.info("Verifying connection to Home Assistant...")
+
+        if __event_emitter__:
+            __event_emitter__({"type": "status", "data": {"description": "Connecting to Home Assistant...", "done": False}})
+
         try:
             # A simple GET request to the base API endpoint to check connectivity and auth
             response = self.session.get(f"{self.ha_url}/api/")
             response.raise_for_status()
             self.logger.info("Home Assistant connection verified successfully.")
+
+            if __event_emitter__:
+                __event_emitter__({"type": "status", "data": {"description": "Connected successfully", "done": True}})
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401:
                 self.logger.error("Authentication failed. Please check your HA_API_KEY.")
+                if __event_emitter__:
+                    __event_emitter__({"type": "status", "data": {"description": "Authentication failed", "done": True}})
                 raise ConnectionError("Authentication failed. Invalid Home Assistant API Key.")
+            if __event_emitter__:
+                __event_emitter__({"type": "status", "data": {"description": f"Connection failed (HTTP {e.response.status_code})", "done": True}})
             raise ConnectionError(f"Failed to connect to Home Assistant (HTTP {e.response.status_code}): {e}")
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Failed to connect to {self.ha_url}. Please check the URL and network connectivity.")
+            if __event_emitter__:
+                __event_emitter__({"type": "status", "data": {"description": "Network error", "done": True}})
             raise ConnectionError(f"Could not connect to Home Assistant: {e}")
 
-    def _get_all_entities(self) -> List[Dict]:
+    def _get_all_entities(self, __event_emitter__: Optional[Callable] = None) -> List[Dict]:
         """
         Fetches all entity states from Home Assistant, using a cache to avoid repeated calls.
         The cache expires after 60 seconds.
         """
         if self.entities_cache and self.entities_last_fetched and \
            (datetime.now() - self.entities_last_fetched) < timedelta(seconds=60):
+            self.logger.debug("Using cached entity list")
             return self.entities_cache
+
+        if __event_emitter__:
+            __event_emitter__({"type": "status", "data": {"description": "Fetching entity list from Home Assistant...", "done": False}})
 
         try:
             response = self.session.get(f"{self.ha_url}/api/states")
             response.raise_for_status()  # Raises an HTTPError for bad responses (4xx or 5xx)
             self.entities_cache = response.json()
             self.entities_last_fetched = datetime.now()
+            self.logger.debug(f"Fetched {len(self.entities_cache)} entities from Home Assistant")
+
+            if __event_emitter__:
+                __event_emitter__({"type": "status", "data": {"description": f"Retrieved {len(self.entities_cache)} entities", "done": True}})
+
             return self.entities_cache
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Error fetching entities from Home Assistant: {e}")
             self.entities_cache = None # Invalidate cache on error
             return []
 
-    def _resolve_entity_id(self, device_name: str) -> Optional[str]:
+    def _resolve_entity_id(self, device_name: str, __event_emitter__: Optional[Callable] = None) -> Optional[str]:
         """
         Resolves a human-readable device name to its Home Assistant entity ID.
         It performs a case-insensitive search on the 'friendly_name' attribute.
         """
-        entities = self._get_all_entities()
+        entities = self._get_all_entities(__event_emitter__)
         for entity in entities:
             # Check if the friendly_name attribute exists and matches the device name
             if entity.get("attributes", {}).get("friendly_name", "").lower() == device_name.lower():
-                return entity["entity_id"]
+                entity_id = entity["entity_id"]
+                self.logger.debug(f"Resolved '{device_name}' to entity_id '{entity_id}'")
+                return entity_id
+        self.logger.warning(f"Could not resolve device name '{device_name}' to an entity_id")
         return None
 
     def _get_entity_state(self, entity_id: str) -> Optional[Dict[str, Any]]:
@@ -197,15 +265,24 @@ class Tools:
             self.logger.error(error_message)
             return error_message
 
-    def control_device_state(self, device_name: str, state: str) -> str:
+    def control_device_state(
+        self,
+        device_name: str,
+        state: str,
+        __event_emitter__: Optional[Callable] = None
+    ) -> str:
         """
         Performs simple on/off control for any device. For advanced light controls (brightness, color), use the 'set_light_attributes' function.
 
         :param device_name: The friendly, human-readable name of the device to control, for example, "Bedroom Fan" or "Coffee Machine".
         :param state: The desired state for the device. Must be "on" or "off".
+        :param __event_emitter__: Optional event emitter for progress updates.
         :return: A user-facing confirmation of the action or a descriptive error message if it fails.
         """
-        entity_id = self._resolve_entity_id(device_name)
+        if __event_emitter__:
+            __event_emitter__({"type": "status", "data": {"description": f"Looking up device '{device_name}'...", "done": False}})
+
+        entity_id = self._resolve_entity_id(device_name, __event_emitter__)
         if not entity_id:
             return f"Error: Could not find a device named '{device_name}'."
 
@@ -219,10 +296,19 @@ class Tools:
         if not service:
             return f"Error: Unsupported state '{state}'. Please use 'on' or 'off'."
 
+        if __event_emitter__:
+            __event_emitter__({"type": "status", "data": {"description": f"Turning {state} '{device_name}'...", "done": False}})
+
         payload = {"entity_id": entity_id}
         error = self._call_service(domain, service, payload, device_name)
         if error:
+            if __event_emitter__:
+                __event_emitter__({"type": "status", "data": {"description": "Operation failed", "done": True}})
             return error
+
+        if __event_emitter__:
+            __event_emitter__({"type": "status", "data": {"description": f"Successfully turned {state} '{device_name}'", "done": True}})
+
         return f"Successfully turned {state} the {device_name}."
 
     def set_light_attributes(
@@ -232,6 +318,7 @@ class Tools:
         brightness_percent: Optional[int] = None,
         color_name: Optional[str] = None,
         kelvin: Optional[int] = None,
+        __event_emitter__: Optional[Callable] = None
     ) -> str:
         """
         Controls multiple attributes of a light in a single command. This is the primary function for controlling lights.
@@ -241,9 +328,13 @@ class Tools:
         :param brightness_percent: The desired brightness level as a percentage from 0 to 100.
         :param color_name: The desired color, specified by name (e.g., "red", "blue", "green").
         :param kelvin: The desired color temperature in Kelvin (e.g., 2700 for warm white, 6500 for cool white).
+        :param __event_emitter__: Optional event emitter for progress updates.
         :return: A user-facing confirmation of the actions taken or a descriptive error message.
         """
-        entity_id = self._resolve_entity_id(device_name)
+        if __event_emitter__:
+            __event_emitter__({"type": "status", "data": {"description": f"Configuring light '{device_name}'...", "done": False}})
+
+        entity_id = self._resolve_entity_id(device_name, __event_emitter__)
         if not entity_id:
             return f"Error: Could not find a device named '{device_name}'."
 
@@ -252,7 +343,7 @@ class Tools:
 
         # If the state is 'off', we can ignore all other parameters and just turn the light off.
         if state and state.lower() == "off":
-            return self.control_device_state(device_name, "off")
+            return self.control_device_state(device_name, "off", __event_emitter__)
 
         # For all other cases, we use the 'turn_on' service and build the payload.
         payload = {"entity_id": entity_id}
@@ -282,7 +373,13 @@ class Tools:
 
         error = self._call_service("light", "turn_on", payload, device_name)
         if error:
+            if __event_emitter__:
+                __event_emitter__({"type": "status", "data": {"description": "Light control failed", "done": True}})
             return error
+
+        if __event_emitter__:
+            __event_emitter__({"type": "status", "data": {"description": f"Light '{device_name}' configured successfully", "done": True}})
+
         if changes:
             return f"Successfully set {device_name} with {', '.join(changes)}."
         else:
@@ -354,11 +451,16 @@ class Tools:
             return error
         return f"Successfully activated the '{scene_name}' scene."
 
-    def list_available_entities(self, entity_type: str) -> str:
+    def list_available_entities(
+        self,
+        entity_type: str,
+        __event_emitter__: Optional[Callable] = None
+    ) -> str:
         """
         Lists all available entities of a specific type (e.g., lights, switches, scenes) by their friendly names.
 
         :param entity_type: The type of entity to list (e.g., "lights", "switches", "scenes", "automations", "sensors", "cameras").
+        :param __event_emitter__: Optional event emitter for progress updates.
         :return: A formatted string listing the available entities or a message if none are found.
         """
         domain = self.DOMAIN_MAP.get(entity_type.lower())
@@ -366,7 +468,10 @@ class Tools:
         if not domain:
             return f"Error: Invalid entity type '{entity_type}'. Please specify a valid type like 'lights', 'scenes', etc."
 
-        all_entities = self._get_all_entities()
+        if __event_emitter__:
+            __event_emitter__({"type": "status", "data": {"description": f"Listing {entity_type}...", "done": False}})
+
+        all_entities = self._get_all_entities(__event_emitter__)
         found_entities = []
         for entity in all_entities:
             if entity.get("entity_id", "").startswith(f"{domain}."):
@@ -374,7 +479,12 @@ class Tools:
                 found_entities.append(friendly_name)
 
         if not found_entities:
+            if __event_emitter__:
+                __event_emitter__({"type": "status", "data": {"description": f"No {entity_type} found", "done": True}})
             return f"No available {entity_type} found in Home Assistant."
+
+        if __event_emitter__:
+            __event_emitter__({"type": "status", "data": {"description": f"Found {len(found_entities)} {entity_type}", "done": True}})
 
         # Format the output nicely for the LLM to present.
         entity_list_str = "\n- ".join(found_entities)
@@ -1190,9 +1300,11 @@ class App:
     It is responsible for initializing the tool and handling its lifecycle.
     It acts as an entry point for the OpenWebUI, which will instantiate it and manage its lifecycle.
     """
-    def __init__(self, valves: Any):
-        self.valves = valves
-        self.tools = Tools(valves)
+    def __init__(self):
+        self.valves = Valves()
+        self.tools = None
 
     def __call__(self, *args, **kwargs):
+        if self.tools is None:
+            self.tools = Tools(self.valves)
         return self.tools
