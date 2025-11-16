@@ -208,6 +208,7 @@ class Tools:
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Error fetching entities from Home Assistant: {e}")
             self.entities_cache = None # Invalidate cache on error
+            self.entities_last_fetched = None
             return []
 
     def _resolve_entity_id(self, device_name: str, __event_emitter__: Optional[Callable] = None) -> Optional[str]:
